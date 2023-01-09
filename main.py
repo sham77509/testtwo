@@ -130,23 +130,58 @@ class SelfExpression(nn.Module):
         return y
 
 
+
+
+class Selfattention(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.in_channels = in_channels
+        self.query = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1)
+        self.key = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1)
+        self.value = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1)
+        self.gamma = nn.Parameter(torch.zeros(1))  # gamma为一个衰减参数，由torch.zero生成，nn.Parameter的作用是将其转化成为可以训练的参数.
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, input):
+        batch_size, channels, height, width = input.shape    #[400,1,32,32]
+        # input: B, C, H, W -> q: B, H * W, C // 8
+        q = self.query(input).view(batch_size, -1, height * width).permute(0, 2, 1)   #q    [400,1024,1]
+        # input: B, C, H, W -> k: B, C // 8, H * W
+        k = self.key(input).view(batch_size, -1, height * width)  #k    [400,1,1024]
+        # input: B, C, H, W -> v: B, C, H * W
+        v = self.value(input).view(batch_size, -1, height * width)   #v    [400,1,1024]
+        # q: B, H * W, C // 8 x k: B, C // 8, H * W -> attn_matrix: B, H * W, H * W
+        attn_matrix = torch.bmm(q, k)  # torch.bmm进行tensor矩阵乘法,q与k相乘得到的值为attn_matrix.
+        attn_matrix = self.softmax(attn_matrix)  # 经过一个softmax进行缩放权重大小.
+        out = torch.bmm(v, attn_matrix.permute(0, 2, 1))  # tensor.permute将矩阵的指定维进行换位.这里将1于2进行换位。
+        out = out.view(*input.shape)
+
+        return self.gamma * out + input
+
+
+
+
 class DSCNet(nn.Module):
     def __init__(self, channels, kernels, num_sample):
         super(DSCNet, self).__init__()
         self.n = num_sample
         self.ae = ConvAE(channels, kernels)
         self.self_expression = SelfExpression(self.n)
+        self.self_attention=Selfattention(1);
+
 
     def forward(self, x):  # shape=[n, c, w, h]
-        z = self.ae.encoder(x)
-
+        z = self.ae.encoder(x)  #z [400,5,4,4]
         # self expression layer, reshape to vectors, multiply Coefficient, then reshape back
-        shape = z.shape
-        z = z.view(self.n, -1)  # shape=[n, d]
-        z_recon = self.self_expression(z)  # shape=[n, d]
-        z_recon_reshape = z_recon.view(shape)
+        shape = z.shape  # shape [400,5,4,4]
+        z = z.view(self.n, -1)  # shape=[n, d]  #z  [400,80]
+        z_recon = self.self_expression(z)  # shape=[n, d]   # z_recon  [400,80]
+        z_recon_reshape = z_recon.view(shape)  # z_recon_reshape  [400,5,4,4]
+        x_recon = self.ae.decoder(z_recon_reshape)  # shape=[n, c, w, h]  #x_recon [400,1,32,32]   # x [1440,1,32,32]
 
-        x_recon = self.ae.decoder(z_recon_reshape)  # shape=[n, c, w, h]
+        x_recon=self.self_attention(x_recon)
+
+
         return x_recon, z, z_recon
 
     def loss_fn(self, x, x_recon, z, z_recon, weight_coef, weight_selfExp):
@@ -185,7 +220,7 @@ if __name__ == "__main__":
     import argparse
     import warnings
 
-    parser = argparse.ArgumentParser(description='DSCNet')
+    parser = argparse.ArgumentParser(description='coil20')
     parser.add_argument('--db', default='coil20',
                         choices=['coil20', 'coil100', 'orl', 'reuters10k', 'stl'])
     parser.add_argument('--show-freq', default=10, type=int)
@@ -202,7 +237,7 @@ if __name__ == "__main__":
     db = args.db
     if db == 'coil20':
         # load data
-        data = sio.loadmat('Data/COIL20.mat')
+        data = sio.loadmat('datasets/COIL20.mat')
         x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
         y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
 
@@ -221,7 +256,7 @@ if __name__ == "__main__":
         warnings.warn("You can uncomment line#64 in post_clustering.py to get better result for this dataset!")
     elif db == 'coil100':
         # load data
-        data = sio.loadmat('Data/COIL100.mat')
+        data = sio.loadmat('datasets/COIL100.mat')
         x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
         y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
 
@@ -239,7 +274,7 @@ if __name__ == "__main__":
         ro = 8  #
     elif db == 'orl':
         # load data
-        data = sio.loadmat('Data/ORL_32x32.mat')
+        data = sio.loadmat('datasets/ORL_32x32.mat')
         x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
         y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
         # network and optimization parameters
@@ -254,6 +289,11 @@ if __name__ == "__main__":
         alpha = 0.2  # threshold of C
         dim_subspace = 3  # dimension of each subspace
         ro = 1  #
+
+    #####   x [1440,1,32,32]
+    ####    y[1440,]  (1440,0)
+
+    # num_sample 1440  channels [1, 15]    kernels [5]
 
     dscnet = DSCNet(num_sample=num_sample, channels=channels, kernels=kernels)
     dscnet.to(device)
